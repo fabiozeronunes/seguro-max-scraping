@@ -9,6 +9,15 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.SCRAPING_API_KEY || 'seguro-max-scraping-2024';
 
+// Request logging
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms`);
+  });
+  next();
+});
+
 // Auth middleware
 function auth(req, res, next) {
   const key = req.headers['x-api-key'] || req.query.key;
@@ -30,17 +39,17 @@ app.post('/google-maps', auth, async (req, res) => {
 
   let browser;
   try {
+    console.log(`[Google Maps] Searching: "${query}" (limit: ${limit})`);
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     const page = await browser.newPage();
+    await page.setDefaultTimeout(30000);
     
-    // Navigate to Google Maps search
     const url = `https://www.google.com/maps/search/${encodeURIComponent(query)}/`;
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     
-    // Wait for results to load
     await page.waitForTimeout(5000);
     
     // Scroll the results panel to load more
@@ -129,10 +138,10 @@ app.post('/google-maps', auth, async (req, res) => {
     res.json({ results, total: results.length });
     
   } catch (error) {
-    console.error('Google Maps error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('[Google Maps] Error:', error.message);
+    res.json({ results: [], total: 0, error: error.message });
   } finally {
-    if (browser) await browser.close();
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
@@ -143,13 +152,14 @@ app.post('/google-negocios', auth, async (req, res) => {
 
   let browser;
   try {
+    console.log(`[Google Negocios] Searching: "${query}" (limit: ${limit})`);
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     const page = await browser.newPage();
+    await page.setDefaultTimeout(30000);
     
-    // Navigate to Google search with local results
     const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=pt-BR&gl=br`;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await page.waitForTimeout(3000);
@@ -220,10 +230,10 @@ app.post('/google-negocios', auth, async (req, res) => {
     res.json({ results, total: results.length });
     
   } catch (error) {
-    console.error('Google Negócios error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('[Google Negocios] Error:', error.message);
+    res.json({ results: [], total: 0, error: error.message });
   } finally {
-    if (browser) await browser.close();
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
@@ -234,11 +244,13 @@ app.post('/bing', auth, async (req, res) => {
 
   let browser;
   try {
+    console.log(`[Bing] Searching: "${query}" (limit: ${limit})`);
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     const page = await browser.newPage();
+    await page.setDefaultTimeout(30000);
     
     const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=pt-BR&cc=BR`;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
@@ -294,10 +306,10 @@ app.post('/bing', auth, async (req, res) => {
     res.json({ results, total: results.length });
     
   } catch (error) {
-    console.error('Bing error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('[Bing] Error:', error.message);
+    res.json({ results: [], total: 0, error: error.message });
   } finally {
-    if (browser) await browser.close();
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
@@ -330,6 +342,18 @@ app.post('/search', auth, async (req, res) => {
   });
 });
 
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 app.listen(PORT, () => {
   console.log(`Scraping service running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
 });
