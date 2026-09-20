@@ -287,6 +287,11 @@ app.post('/bing', auth, async (req, res) => {
     const page = await browser.newPage();
     await page.setDefaultTimeout(30000);
     
+    // Force Brazilian Portuguese locale via headers
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'pt-BR,pt;q=0.9',
+    });
+    
     // Force Brazilian Portuguese locale
     const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=pt-BR&setlang=pt-BR&cc=BR&count=${limit + 5}`;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
