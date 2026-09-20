@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: seguro-max-scraping
+    runtime: docker
+    plan: free
+    envVars:
+      - key: SCRAPING_API_KEY
+        generateValue: true
+      - key: NODE_ENV
+        value: production
