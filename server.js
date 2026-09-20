@@ -145,7 +145,7 @@ app.post('/google-maps', auth, async (req, res) => {
   }
 });
 
-// Google Negócios - uses Google Maps with more detail (clicking into results)
+// Google Negócios - fast Google Maps search without click-to-detail
 app.post('/google-negocios', auth, async (req, res) => {
   const { query, limit = 10 } = req.body;
   if (!query) return res.status(400).json({ error: 'Query is required' });
@@ -157,35 +157,31 @@ app.post('/google-negocios', auth, async (req, res) => {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
-    const context = await browser.newContext({
-      locale: 'pt-BR',
-      extraHTTPHeaders: { 'Accept-Language': 'pt-BR,pt;q=0.9' },
-    });
-    const page = await context.newPage();
+    const page = await browser.newPage();
     await page.setDefaultTimeout(30000);
 
-    // Use Google Maps search - same as google-maps but with detail clicks
     const url = `https://www.google.com/maps/search/${encodeURIComponent(query)}/`;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(5000);
 
-    // Scroll feed to load results
+    // Scroll to load more results
     const scrollable = await page.$('[role="feed"]');
     if (scrollable) {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         await scrollable.evaluate(el => el.scrollTop += 500);
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(800);
       }
     }
 
-    // Get list of results first
-    const listResults = await page.evaluate((maxResults) => {
+    // Extract everything from list view - enhanced extraction
+    const businesses = await page.evaluate((maxResults) => {
       const results = [];
       const seen = new Set();
       const cards = document.querySelectorAll('[class*="Nv2PK"], [role="article"], .bfdHYd');
 
       for (const card of cards) {
         if (results.length >= maxResults) break;
+
         const nameEl = card.querySelector('[class*="qBF1Pd"], .fontHeadlineSmall, .NrDZNb');
         const name = nameEl?.textContent?.trim() || '';
         if (!name || seen.has(name)) continue;
@@ -194,67 +190,27 @@ app.post('/google-negocios', auth, async (req, res) => {
         const ratingEl = card.querySelector('[class*="MW4etd"], .MW4etd');
         const rating = ratingEl?.textContent?.trim() || '';
 
-        const ariaLabel = card.getAttribute('aria-label') || '';
-        const phoneMatch = ariaLabel.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
+        const reviewsEl = card.querySelector('[class*="UY7F9"], .UY7F9');
+        const reviews = reviewsEl?.textContent?.replace(/[()]/g, '').trim() || '';
 
-        // Try to click to get detail (phone, address, website)
-        results.push({ name, rating, phone: phoneMatch?.[1] || '' });
+        // Get all text from card for phone extraction
+        const fullText = card.innerText || '';
+        const phoneMatch = fullText.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
+
+        // Get category from aria-label or card text
+        const categoryParts = fullText.split('\n').filter(l => l.length > 2 && l.length < 50);
+        const category = categoryParts.find(l => /loja|restaurante|mecânica|oficina|auto|serviço|comércio/i.test(l)) || '';
+
+        // Get address
+        const addressParts = fullText.split('\n');
+        const address = addressParts.find(l => /\d+.*(?:rua|av|alameda|rod|br-|bairro)/i.test(l) || /\d{5}-?\d{3}/.test(l)) || '';
+
+        results.push({ name, rating, reviews, category, address, phone: phoneMatch?.[1] || '' });
       }
       return results;
     }, limit);
 
-    // Try to click each result to extract phone/address/website
-    const detailedResults = [];
-    const cards = await page.$$('[class*="Nv2PK"], [role="article"], .bfdHYd');
-
-    for (let i = 0; i < Math.min(listResults.length, cards.length); i++) {
-      const base = listResults[i];
-      try {
-        await cards[i].click();
-        await page.waitForTimeout(2000);
-
-        const detail = await page.evaluate(() => {
-          const getText = (sel) => document.querySelector(sel)?.textContent?.trim() || '';
-
-          // Phone
-          const allText = document.body.innerText || '';
-          const phoneMatch = allText.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
-
-          // Address - look for aria-label with "endereco" or street patterns
-          const addrEl = document.querySelector('[data-item-id="address"] .Io6YTe, [data-tooltip*="endereco"] .Io6YTe');
-          const address = addrEl?.textContent?.trim() || '';
-
-          // Website
-          const websiteEl = document.querySelector('[data-item-id="authority"] .Io6YTe, a[data-item-id="authority"]');
-          const website = websiteEl?.textContent?.trim() || websiteEl?.href || '';
-
-          // Category
-          const catEl = document.querySelector('.DkEaL, button[jsaction*="category"]');
-          const category = catEl?.textContent?.trim() || '';
-
-          return { phone: phoneMatch?.[1] || '', address, website, category };
-        });
-
-        detailedResults.push({
-          ...base,
-          phone: base.phone || detail.phone,
-          address: detail.address,
-          website: detail.website,
-          category: detail.category,
-        });
-
-        // Go back to results list
-        await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
-        await page.waitForTimeout(1500);
-      } catch {
-        detailedResults.push({ ...base, address: '', website: '', category: '' });
-        // Try to go back
-        await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
-        await page.waitForTimeout(1000);
-      }
-    }
-
-    const results = detailedResults.map(b => ({
+    const results = businesses.map(b => ({
       fonte: 'Google Negócios',
       nome: b.name,
       email: '',
@@ -264,8 +220,8 @@ app.post('/google-negocios', auth, async (req, res) => {
       endereco: b.address,
       cidade: '',
       estado: '',
-      website: b.website,
-      descricao: `${b.category} ${b.rating ? '- Nota: ' + b.rating : ''}`.trim(),
+      website: '',
+      descricao: `${b.category} ${b.rating ? '- Nota: ' + b.rating : ''} ${b.reviews ? '(' + b.reviews + ')' : ''}`.trim(),
       url_origem: url,
     }));
 
@@ -279,7 +235,7 @@ app.post('/google-negocios', auth, async (req, res) => {
   }
 });
 
-// Bing scraping - uses Bing Maps to avoid locale/IP issues
+// Bing scraping - uses Bing Maps search
 app.post('/bing', auth, async (req, res) => {
   const { query, limit = 10 } = req.body;
   if (!query) return res.status(400).json({ error: 'Query is required' });
@@ -291,77 +247,50 @@ app.post('/bing', auth, async (req, res) => {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
-    const context = await browser.newContext({
-      locale: 'pt-BR',
-      extraHTTPHeaders: { 'Accept-Language': 'pt-BR,pt;q=0.9' },
-    });
-    const page = await context.newPage();
+    const page = await browser.newPage();
     await page.setDefaultTimeout(30000);
 
-    // Use Bing Maps search
-    const url = `https://www.bing.com/maps?q=${encodeURIComponent(query)}&setlang=pt-BR&FORM=HDRSC6`;
+    // Try Bing Maps with explicit location in query
+    const searchQuery = `${query} -pt-BR brasil`;
+    const url = `https://www.bing.com/maps?q=${encodeURIComponent(searchQuery)}&FORM=HDRSC6`;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(6000);
 
-    // Extract results from Bing Maps
+    // Extract results from Bing Maps side panel
     const businesses = await page.evaluate((maxResults) => {
       const results = [];
       const seen = new Set();
 
-      // Bing Maps uses different selectors
-      const cards = document.querySelectorAll('.card, .br-poi, [class*="entityList"] > div, .b_entityTl');
+      // Try various Bing Maps selectors
+      const cards = document.querySelectorAll('[class*="card"], .br-poi, .b_entityTl, [data-list], li[role="option"]');
 
       for (const card of cards) {
         if (results.length >= maxResults) break;
 
-        const nameEl = card.querySelector('.card_title, .b_entityTlTitle, h2, [class*="title"]');
-        const name = nameEl?.textContent?.trim() || '';
-        if (!name || seen.has(name)) continue;
+        const nameEl = card.querySelector('h2, [class*="title"], a[aria-label]');
+        const name = nameEl?.textContent?.trim() || nameEl?.getAttribute('aria-label') || '';
+        if (!name || seen.has(name) || name.length < 3) continue;
         seen.add(name);
 
         const fullText = card.innerText || '';
         const phoneMatch = fullText.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
-
-        // Address
-        const addrEl = card.querySelector('.card_address, .b_entityTlAddress, [class*="address"]');
+        const addrEl = card.querySelector('[class*="address"]');
         const address = addrEl?.textContent?.trim() || '';
-
-        // Website
         const linkEl = card.querySelector('a[href]');
         const website = linkEl?.href || '';
 
-        results.push({
-          name,
-          phone: phoneMatch?.[1] || '',
-          address,
-          website,
-        });
+        results.push({ name, phone: phoneMatch?.[1] || '', address, website });
       }
 
-      // Fallback: try links with /maps/place
+      // Fallback: try extracting all link texts from map results
       if (results.length === 0) {
-        const links = document.querySelectorAll('a[href*="/maps/place"], a[href*="bing.com/maps"]');
-        for (const link of links) {
+        const allLinks = document.querySelectorAll('a[aria-label]');
+        for (const link of allLinks) {
           if (results.length >= maxResults) break;
-          const name = link.getAttribute('aria-label') || link.textContent?.trim() || '';
-          if (name && name.length > 3 && !seen.has(name)) {
-            seen.add(name);
-            results.push({ name, phone: '', address: '', website: '' });
-          }
-        }
-      }
-
-      // Fallback 2: extract from any visible list with business-like content
-      if (results.length === 0) {
-        const allDivs = document.querySelectorAll('[role="listitem"], li');
-        for (const div of allDivs) {
-          if (results.length >= maxResults) break;
-          const text = div.innerText || '';
-          const phoneMatch = text.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
-          const nameMatch = text.split('\n')[0]?.trim();
-          if (nameMatch && nameMatch.length > 3 && !seen.has(nameMatch)) {
-            seen.add(nameMatch);
-            results.push({ name: nameMatch, phone: phoneMatch?.[1] || '', address: '', website: '' });
+          const label = link.getAttribute('aria-label') || '';
+          if (label.length > 5 && !seen.has(label) && !/bing|maps|menu|search|sign/i.test(label)) {
+            seen.add(label);
+            results.push({ name: label, phone: '', address: '', website: '' });
           }
         }
       }
