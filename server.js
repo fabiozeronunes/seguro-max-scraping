@@ -157,7 +157,15 @@ app.post('/google-negocios', auth, async (req, res) => {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
-    const page = await browser.newPage();
+
+    // Create context with Brazilian geolocation
+    const context = await browser.newContext({
+      locale: 'pt-BR',
+      geolocation: { latitude: -22.9711, longitude: -42.0172 },
+      permissions: ['geolocation'],
+      extraHTTPHeaders: { 'Accept-Language': 'pt-BR,pt;q=0.9' },
+    });
+    const page = await context.newPage();
     await page.setDefaultTimeout(30000);
 
     // Use Google search with explicit Brazilian locale
@@ -284,15 +292,17 @@ app.post('/bing', auth, async (req, res) => {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
-    const page = await browser.newPage();
+    
+    // Create context with Brazilian geolocation to force BR results
+    const context = await browser.newContext({
+      locale: 'pt-BR',
+      geolocation: { latitude: -22.9711, longitude: -42.0172 }, // Cabo Frio, RJ
+      permissions: ['geolocation'],
+      extraHTTPHeaders: { 'Accept-Language': 'pt-BR,pt;q=0.9' },
+    });
+    const page = await context.newPage();
     await page.setDefaultTimeout(30000);
     
-    // Force Brazilian Portuguese locale via headers
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'pt-BR,pt;q=0.9',
-    });
-    
-    // Force Brazilian Portuguese locale
     const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=pt-BR&setlang=pt-BR&cc=BR&count=${limit + 5}`;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(3000);
