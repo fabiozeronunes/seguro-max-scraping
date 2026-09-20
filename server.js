@@ -159,51 +159,86 @@ app.post('/google-negocios', auth, async (req, res) => {
     });
     const page = await browser.newPage();
     await page.setDefaultTimeout(30000);
+
+    // Use Google search with explicit Brazilian locale
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=pt-BR&gl=br&num=${limit + 5}`;
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
+    await page.waitForTimeout(2000);
     
-    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=pt-BR&gl=br`;
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForTimeout(3000);
-    
-    // Extract local business results
+    // Extract local business results using broad selectors
     const businesses = await page.evaluate((maxResults) => {
       const results = [];
+      const seen = new Set();
       
-      // Method 1: Local pack results
-      const localCards = document.querySelectorAll('.VkpGBb, [data-attrid="kc:/local:one box"], .rllt__details');
+      // Method 1: Local pack - try multiple modern selectors
+      const selectors = [
+        '.VkpGBb', '[data-attrid="kc:/local:one box"]',
+        '.rllt__details', '.dbg0pd',
+        'div[data-local-attribute]', '.luUGC',
+        '[jsname] > div > div > a[data-ved]'
+      ];
       
-      for (const card of localCards) {
+      for (const sel of selectors) {
         if (results.length >= maxResults) break;
-        
-        const nameEl = card.querySelector('.dbg0pd, .OSrXXb, [role="heading"]');
-        const name = nameEl?.textContent?.trim() || '';
-        
-        const ratingEl = card.querySelector('.yi40Hd, .BTtC6e');
-        const rating = ratingEl?.textContent?.trim() || '';
-        
-        const reviewsEl = card.querySelector('.rst9');
-        const reviews = reviewsEl?.textContent?.replace(/[()]/g, '').trim() || '';
-        
-        const categoryEl = card.querySelector('.rllt__details div:nth-child(2) span');
-        const category = categoryEl?.textContent?.trim() || '';
-        
-        const addressEl = card.querySelector('.rllt__details div:nth-child(3) span, .rllt__details div:nth-child(2) div:nth-child(2) span');
-        const address = addressEl?.textContent?.trim() || '';
-        
-        if (name) {
-          results.push({ name, rating, reviews, category, address });
+        const cards = document.querySelectorAll(sel);
+        for (const card of cards) {
+          if (results.length >= maxResults) break;
+          
+          // Find name: heading, link text, or first significant text
+          const nameEl = card.closest('[data-attrid]')?.querySelector('[role="heading"]')
+            || card.querySelector('[role="heading"], .dbg0pd, .OSrXXb, span[lang]')
+            || card;
+          const name = nameEl?.textContent?.trim()?.substring(0, 100) || '';
+          if (!name || seen.has(name) || name.length < 3) continue;
+          
+          // Get full text of the card for phone/address extraction
+          const cardContainer = card.closest('[data-attrid]') || card.parentElement || card;
+          const fullText = cardContainer?.innerText || card.innerText || '';
+          
+          // Extract phone
+          const phoneMatch = fullText.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
+          const phone = phoneMatch ? phoneMatch[1] : '';
+          
+          // Extract address (lines after name, before phone)
+          const lines = fullText.split('\n').filter(l => l.trim().length > 3);
+          let address = '';
+          for (const line of lines) {
+            if (/\d{5}-?\d{3}/.test(line) || /rua|av|alameda|travessa|rodovia/i.test(line)) {
+              address = line.trim().substring(0, 100);
+              break;
+            }
+          }
+          
+          seen.add(name);
+          results.push({ name, rating: '', reviews: '', category: '', address, phone });
         }
       }
       
-      // Method 2: Alternative selectors
+      // Method 2: If nothing found, try generic approach with aria labels
       if (results.length === 0) {
-        const altCards = document.querySelectorAll('[data-attrid*="local"]');
-        for (const card of altCards) {
+        const allLinks = document.querySelectorAll('a[href*="/maps/place"]');
+        for (const link of allLinks) {
           if (results.length >= maxResults) break;
-          const name = card.querySelector('[role="heading"]')?.textContent?.trim() || '';
-          const text = card.innerText || '';
+          const name = link.getAttribute('aria-label') || link.textContent?.trim() || '';
+          if (name && name.length > 3 && !seen.has(name)) {
+            seen.add(name);
+            results.push({ name, rating: '', reviews: '', category: '', address: '', phone: '' });
+          }
+        }
+      }
+      
+      // Method 3: Last resort - extract from visible text blocks
+      if (results.length === 0) {
+        const blocks = document.querySelectorAll('.g, [data-header-feature]');
+        for (const block of blocks) {
+          if (results.length >= maxResults) break;
+          const heading = block.querySelector('h3');
+          const name = heading?.textContent?.trim() || '';
+          const text = block.innerText || '';
           const phoneMatch = text.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
           
-          if (name) {
+          if (name && (phoneMatch || /oficina|mecânica|auto/i.test(name))) {
+            seen.add(name);
             results.push({ name, rating: '', reviews: '', category: '', address: '', phone: phoneMatch?.[1] || '' });
           }
         }
@@ -252,15 +287,18 @@ app.post('/bing', auth, async (req, res) => {
     const page = await browser.newPage();
     await page.setDefaultTimeout(30000);
     
-    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=pt-BR&cc=BR`;
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    // Force Brazilian Portuguese locale
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=pt-BR&setlang=pt-BR&cc=BR&count=${limit + 5}`;
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(3000);
     
     // Extract search results
     const businesses = await page.evaluate((maxResults) => {
       const results = [];
+      const seen = new Set();
       
-      const items = document.querySelectorAll('.b_algo, .b_ans');
+      // Only use .b_algo (organic results), skip .b_ans (ads/answers)
+      const items = document.querySelectorAll('.b_algo');
       
       for (const item of items) {
         if (results.length >= maxResults) break;
@@ -269,18 +307,22 @@ app.post('/bing', auth, async (req, res) => {
         const title = titleEl?.textContent?.trim() || '';
         const link = titleEl?.href || '';
         
-        const snippetEl = item.querySelector('.b_caption p, .b_algoSlug');
+        const snippetEl = item.querySelector('.b_caption p, .b_algoSlug, .b_lineclamp2');
         const snippet = snippetEl?.textContent?.trim() || '';
         
+        const fullText = `${title} ${snippet}`;
+        
         // Extract phone from snippet
-        const phoneMatch = snippet.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
+        const phoneMatch = fullText.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
         const phone = phoneMatch ? phoneMatch[1] : '';
         
         // Extract email from snippet
-        const emailMatch = snippet.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+        const emailMatch = fullText.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
         const email = emailMatch ? emailMatch[1] : '';
         
-        if (title) {
+        // Filter: skip irrelevant results (ads, downloads, etc)
+        if (title && !seen.has(title) && !/download|curso|grátis|coursera|udemy/i.test(title)) {
+          seen.add(title);
           results.push({ title, link, snippet, phone, email });
         }
       }
