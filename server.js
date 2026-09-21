@@ -48,15 +48,15 @@ app.post('/google-maps', auth, async (req, res) => {
     await page.setDefaultTimeout(30000);
     
     const url = `https://www.google.com/maps/search/${encodeURIComponent(query)}/`;
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(2000);
     
     // Scroll the results panel to load more
     const scrollable = await page.$('[role="feed"]');
     if (scrollable) {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 2; i++) {
         await scrollable.evaluate(el => el.scrollTop += 500);
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(1000);
       }
     }
 
@@ -80,7 +80,7 @@ app.post('/google-maps', auth, async (req, res) => {
         });
         
         await cards[i].click();
-        await page.waitForTimeout(2500);
+        await page.waitForTimeout(1500);
 
         const details = await page.evaluate(() => {
           const text = document.body.innerText || '';
