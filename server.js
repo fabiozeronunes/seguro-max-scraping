@@ -49,7 +49,6 @@ app.post('/google-maps', auth, async (req, res) => {
     
     const url = `https://www.google.com/maps/search/${encodeURIComponent(query)}/`;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    
     await page.waitForTimeout(5000);
     
     // Scroll the results panel to load more
@@ -60,83 +59,86 @@ app.post('/google-maps', auth, async (req, res) => {
         await page.waitForTimeout(1000);
       }
     }
-    
-    // Extract business data from the page
-    const businesses = await page.evaluate((maxResults) => {
+
+    // Get business names and links from search results
+    const businessLinks = await page.evaluate((maxResults) => {
       const results = [];
       const seen = new Set();
-      
-      // Method 1: Extract from result cards
       const cards = document.querySelectorAll('[class*="Nv2PK"], [role="article"], .bfdHYd');
-      
       for (const card of cards) {
         if (results.length >= maxResults) break;
-        
         const nameEl = card.querySelector('[class*="qBF1Pd"], .fontHeadlineSmall, .NrDZNb, .qBF1Pd');
         const name = nameEl?.textContent?.trim() || '';
-        
         if (!name || seen.has(name)) continue;
         seen.add(name);
-        
-        // Get rating
-        const ratingEl = card.querySelector('[class*="MW4etd"], .MW4etd');
-        const rating = ratingEl?.textContent?.trim() || '';
-        
-        // Get reviews count
-        const reviewsEl = card.querySelector('[class*="UY7F9"], .UY7F9');
-        const reviews = reviewsEl?.textContent?.replace(/[()]/g, '').trim() || '';
-        
-        // Get category/type
-        const categoryEl = card.querySelector('[class*="W4Efsd"]:last-child, .W4Efsd span:last-child');
-        const category = categoryEl?.textContent?.trim() || '';
-        
-        // Get address
-        const addressEl = card.querySelector('[class*="W4Efsd"] span[class*="fontBodyMedium"]');
-        const address = addressEl?.textContent?.trim() || '';
-        
-        // Try to get phone from aria-label
-        const phoneLabel = card.getAttribute('aria-label') || '';
-        const phoneMatch = phoneLabel.match(/(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/);
-        const phone = phoneMatch ? phoneMatch[1] : '';
-        
-        results.push({ name, rating, reviews, category, address, phone });
+        const link = card.querySelector('a[href*="/maps/place/"]');
+        const href = link?.getAttribute('href') || '';
+        results.push({ name, href });
       }
-      
-      // Method 2: If no cards found, try aria-label approach
-      if (results.length === 0) {
-        const items = document.querySelectorAll('[aria-label]');
-        for (const item of items) {
-          if (results.length >= maxResults) break;
-          const label = item.getAttribute('aria-label');
-          if (label && label.length > 5 && !label.includes('Google') && !label.includes('Maps') && !label.includes('Menu') && !label.includes('Voltar')) {
-            if (!seen.has(label)) {
-              seen.add(label);
-              results.push({ name: label, rating: '', reviews: '', category: '', address: '', phone: '' });
-            }
-          }
-        }
-      }
-      
       return results;
     }, limit);
-    
-    const results = businesses.map(b => ({
-      fonte: 'Google Maps',
-      nome: b.name,
-      email: '',
-      telefone: b.phone || '',
-      whatsapp: (b.phone || '').replace(/\D/g, ''),
-      empresa: b.name,
-      endereco: b.address,
-      cidade: '',
-      estado: '',
-      website: '',
-      descricao: `${b.category} ${b.rating ? '- Nota: ' + b.rating : ''} ${b.reviews ? '(' + b.reviews + ')' : ''}`.trim(),
-      url_origem: `https://www.google.com/maps/search/${encodeURIComponent(query)}`,
-    }));
-    
+
+    console.log(`[Google Maps] Found ${businessLinks.length} businesses, clicking for details...`);
+
+    const results = [];
+    for (const biz of businessLinks) {
+      try {
+        if (biz.href) {
+          await page.goto(`https://www.google.com${biz.href}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await page.waitForTimeout(2000);
+        }
+
+        const details = await page.evaluate(() => {
+          const text = document.body.innerText || '';
+          const phoneMatch = text.match(/(\+?55\s*\(?(\d{2})\)?\s*\d{4,5}[-.\s]?\d{4})/);
+          const phone = phoneMatch ? phoneMatch[1].trim() : '';
+          
+          const addressEl = document.querySelector('[data-item-id="address"] .Io6YTe, [data-item-id="address"]');
+          const address = addressEl?.textContent?.trim() || '';
+          
+          const websiteEl = document.querySelector('[data-item-id="authority"] .Io6YTe, [data-item-id="authority"]');
+          const website = websiteEl?.textContent?.trim() || '';
+
+          return { phone, address, website };
+        });
+
+        results.push({
+          fonte: 'Google Maps',
+          nome: biz.name,
+          email: '',
+          telefone: details.phone,
+          whatsapp: details.phone.replace(/\D/g, ''),
+          empresa: biz.name,
+          endereco: details.address,
+          cidade: '',
+          estado: '',
+          website: details.website,
+          descricao: '',
+          url_origem: `https://www.google.com/maps/search/${encodeURIComponent(query)}/`,
+        });
+
+        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+      } catch (e) {
+        console.log(`[Google Maps] Error on ${biz.name}: ${e.message}`);
+        results.push({
+          fonte: 'Google Maps',
+          nome: biz.name,
+          email: '',
+          telefone: '',
+          whatsapp: '',
+          empresa: biz.name,
+          endereco: '',
+          cidade: '',
+          estado: '',
+          website: '',
+          descricao: '',
+          url_origem: `https://www.google.com/maps/search/${encodeURIComponent(query)}/`,
+        });
+      }
+    }
+
     res.json({ results, total: results.length });
-    
   } catch (error) {
     console.error('[Google Maps] Error:', error.message);
     res.json({ results: [], total: 0, error: error.message });
