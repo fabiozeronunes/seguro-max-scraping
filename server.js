@@ -48,67 +48,83 @@ app.post('/google-maps', auth, async (req, res) => {
     await page.setDefaultTimeout(30000);
     
     const url = `https://www.google.com/maps/search/${encodeURIComponent(query)}/`;
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(5000);
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(3000);
     
     // Scroll the results panel to load more
     const scrollable = await page.$('[role="feed"]');
     if (scrollable) {
       for (let i = 0; i < 3; i++) {
         await scrollable.evaluate(el => el.scrollTop += 500);
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(1500);
       }
     }
 
-    // Get business names and links from search results
-    const businessLinks = await page.evaluate((maxResults) => {
-      const results = [];
-      const seen = new Set();
-      const cards = document.querySelectorAll('[class*="Nv2PK"], [role="article"], .bfdHYd');
-      for (const card of cards) {
-        if (results.length >= maxResults) break;
-        const nameEl = card.querySelector('[class*="qBF1Pd"], .fontHeadlineSmall, .NrDZNb, .qBF1Pd');
-        const name = nameEl?.textContent?.trim() || '';
-        if (!name || seen.has(name)) continue;
-        seen.add(name);
-        const link = card.querySelector('a[href*="/maps/place/"]');
-        const href = link?.getAttribute('href') || '';
-        results.push({ name, href });
-      }
-      return results;
-    }, limit);
-
-    console.log(`[Google Maps] Found ${businessLinks.length} businesses, clicking for details...`);
-
     const results = [];
-    for (const biz of businessLinks) {
+
+    // Strategy 1: Click each card and read the detail panel
+    const cardCount = await page.evaluate(() => {
+      const cards = document.querySelectorAll('[class*="Nv2PK"], [role="article"], .bfdHYd');
+      return cards.length;
+    });
+    console.log(`[Google Maps] Found ${cardCount} cards`);
+
+    for (let i = 0; i < Math.min(cardCount, limit); i++) {
       try {
-        if (biz.href) {
-          await page.goto(`https://www.google.com${biz.href}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          await page.waitForTimeout(2000);
-        }
+        const cards = await page.$$('[class*="Nv2PK"], [role="article"], .bfdHYd');
+        if (!cards[i]) continue;
+        
+        const nameBeforeClick = await cards[i].evaluate(el => {
+          const n = el.querySelector('[class*="qBF1Pd"], .fontHeadlineSmall, .NrDZNb');
+          return n?.textContent?.trim() || '';
+        });
+        
+        await cards[i].click();
+        await page.waitForTimeout(2500);
 
         const details = await page.evaluate(() => {
           const text = document.body.innerText || '';
-          const phoneMatch = text.match(/(\+?55\s*\(?(\d{2})\)?\s*\d{4,5}[-.\s]?\d{4})/);
-          const phone = phoneMatch ? phoneMatch[1].trim() : '';
           
-          const addressEl = document.querySelector('[data-item-id="address"] .Io6YTe, [data-item-id="address"]');
+          // Extract phone from text with multiple patterns
+          let phone = '';
+          const phonePatterns = [
+            /(\+?55\s*\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})/,
+            /(\d{2}\s*\d{4,5}[-.\s]?\d{4})/,
+            /(\+?55\d{10,11})/,
+            /(\d{10,11})/,
+          ];
+          for (const p of phonePatterns) {
+            const m = text.match(p);
+            if (m) { phone = m[1].trim(); break; }
+          }
+          
+          // Also try specific phone elements
+          if (!phone) {
+            const phoneEl = document.querySelector('[data-item-id*="phone"] .Io6YTe')
+              || document.querySelector('[data-item-id*="phone"]')
+              || document.querySelector('button[data-item-id*="phone"]');
+            if (phoneEl) phone = phoneEl.textContent?.trim() || '';
+          }
+
+          const addressEl = document.querySelector('[data-item-id="address"] .Io6YTe')
+            || document.querySelector('[data-item-id="address"]');
           const address = addressEl?.textContent?.trim() || '';
           
-          const websiteEl = document.querySelector('[data-item-id="authority"] .Io6YTe, [data-item-id="authority"]');
+          const websiteEl = document.querySelector('[data-item-id="authority"] .Io6YTe')
+            || document.querySelector('[data-item-id="authority"]');
           const website = websiteEl?.textContent?.trim() || '';
 
           return { phone, address, website };
         });
 
+        const name = nameBeforeClick || `Business ${i + 1}`;
         results.push({
           fonte: 'Google Maps',
-          nome: biz.name,
+          nome: name,
           email: '',
           telefone: details.phone,
           whatsapp: details.phone.replace(/\D/g, ''),
-          empresa: biz.name,
+          empresa: name,
           endereco: details.address,
           cidade: '',
           estado: '',
@@ -117,24 +133,29 @@ app.post('/google-maps', auth, async (req, res) => {
           url_origem: `https://www.google.com/maps/search/${encodeURIComponent(query)}/`,
         });
 
-        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-        await page.waitForTimeout(1000);
+        console.log(`[Google Maps] ${name}: phone=${details.phone || 'none'}`);
       } catch (e) {
-        console.log(`[Google Maps] Error on ${biz.name}: ${e.message}`);
-        results.push({
-          fonte: 'Google Maps',
-          nome: biz.name,
-          email: '',
-          telefone: '',
-          whatsapp: '',
-          empresa: biz.name,
-          endereco: '',
-          cidade: '',
-          estado: '',
-          website: '',
-          descricao: '',
-          url_origem: `https://www.google.com/maps/search/${encodeURIComponent(query)}/`,
-        });
+        console.log(`[Google Maps] Error on card ${i}: ${e.message}`);
+      }
+    }
+
+    // Strategy 2: If clicking didn't extract phones, try extracting from page source JSON
+    if (results.length === 0 || results.every(r => !r.telefone)) {
+      console.log(`[Google Maps] Trying JSON extraction fallback...`);
+      const html = await page.content();
+      const jsonMatches = html.matchAll(/\["(\+?55\s*\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4})"/g);
+      const fallbackPhones = [];
+      for (const m of jsonMatches) {
+        fallbackPhones.push(m[1]);
+      }
+      if (fallbackPhones.length > 0) {
+        console.log(`[Google Maps] JSON fallback found ${fallbackPhones.length} phones`);
+        for (let i = 0; i < Math.min(fallbackPhones.length, results.length); i++) {
+          if (!results[i].telefone) {
+            results[i].telefone = fallbackPhones[i];
+            results[i].whatsapp = fallbackPhones[i].replace(/\D/g, '');
+          }
+        }
       }
     }
 
